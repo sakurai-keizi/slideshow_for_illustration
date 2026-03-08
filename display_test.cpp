@@ -50,8 +50,11 @@ int main(int argc, char* argv[]) {
     if (SDL_GL_SetSwapInterval(-1) < 0) SDL_GL_SetSwapInterval(1);
     SDL_ShowCursor(SDL_DISABLE);
 
-    int sw, sh;
-    SDL_GL_GetDrawableSize(win, &sw, &sh);
+    // HiDPI 環境では SDL_GL_GetDrawableSize が論理サイズを返すことがある。
+    // Python 版と同様に OpenGL のデフォルトビューポートから実フレームバッファサイズを取得する。
+    GLint vp[4];
+    glGetIntegerv(GL_VIEWPORT, vp);
+    int sw = vp[2], sh = vp[3];
 
     // OpenGL 初期化（UV 空間: (0,0)=左下, (1,1)=右上）
     glViewport(0, 0, sw, sh);
