@@ -328,14 +328,14 @@ class SlideShow:
             # 基準位置は整数 px/frame だが、モーションブラー用に連続値で補間する。
             x0 = (pw - sw) / 2.0
             pan = ph - sh
-            offset = min(t_s * DURATION * self.fps * self.pan_px_per_frame, float(pan))
+            offset = min(t_s * self.slide_duration * self.fps * self.pan_px_per_frame, float(pan))
             y0 = offset if pattern == 'top_to_bottom' else float(pan) - offset
         else:
             # 画像全体を左端〜右端まで表示。
             # 基準位置は整数 px/frame だが、モーションブラー用に連続値で補間する。
             y0 = (ph - sh) / 2.0
             pan = pw - sw
-            offset = min(t_s * DURATION * self.fps * self.pan_px_per_frame, float(pan))
+            offset = min(t_s * self.slide_duration * self.fps * self.pan_px_per_frame, float(pan))
             x0 = offset if pattern == 'left_to_right' else float(pan) - offset
 
         return x0 / pw, (x0 + sw) / pw, 1.0 - y0 / ph, 1.0 - (y0 + sh) / ph
@@ -347,7 +347,7 @@ class SlideShow:
         60Hz ディスプレイのサンプルアンドホールド特性による波打ちを解消する。
         """
         N = MOTION_BLUR_SAMPLES
-        frame_dt = 1.0 / (DURATION * self.fps)  # 1フレーム分のアニメーション進行量  # 1フレーム分のアニメーション進行量
+        frame_dt = 1.0 / (self.slide_duration * self.fps)  # 1フレーム分のアニメーション進行量
         a = 1.0 / N                         # 各サンプルの重み
 
         glClear(GL_COLOR_BUFFER_BIT)
