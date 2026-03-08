@@ -54,7 +54,6 @@ from OpenGL.GL import (
 from OpenGL.GLU import gluOrtho2D
 
 DURATION = 10.0          # 1枚あたりの表示秒数
-FPS = 60
 MOTION_BLUR_SAMPLES = 4  # モーションブラーのサンプル数（多いほど滑らか、4で十分）
 DEBUG_HORIZONTAL_ONLY = False  # デバッグ: True のとき横パン画像のみ表示（縦パン画像はスキップ）
 
@@ -149,6 +148,22 @@ class SlideShow:
         self.sw, self.sh = int(vp[2]), int(vp[3])
         pygame.mouse.set_visible(False)
         pygame.display.set_caption('Slideshow')
+        self.fps = self._detect_fps()
+        print(f'ディスプレイ検出FPS: {self.fps}', flush=True)
+
+    def _detect_fps(self) -> int:
+        """vsync flip を複数回計測してディスプレイの実際のリフレッシュレートを返す"""
+        N = 10
+        pygame.display.flip()  # 最初の1回は捨てる
+        t0 = time.perf_counter()
+        for _ in range(N):
+            pygame.display.flip()
+        measured = N / (time.perf_counter() - t0)
+        # 標準的なリフレッシュレートに丸める
+        for standard in (24, 30, 48, 60, 75, 90, 120, 144, 165, 240):
+            if abs(measured - standard) / standard < 0.05:
+                return standard
+        return round(measured)
 
     def _init_gl(self) -> None:
         """OpenGL の基本設定"""
@@ -225,7 +240,7 @@ class SlideShow:
             pan_dist = target_h - self.sh
 
         # 合計パン時間が DURATION に最も近くなる整数 px/frame を選択
-        pan_px_per_frame = max(1, round(pan_dist / (DURATION * FPS)))
+        pan_px_per_frame = max(1, round(pan_dist / (DURATION * self.fps)))
 
         pattern = self._next_pattern(candidates)
 
@@ -299,13 +314,13 @@ class SlideShow:
             # 画像全体を上端〜下端まで表示。整数 px/frame でパン。
             x0 = (pw - sw) / 2.0
             pan = ph - sh
-            offset = min(round(t_s * DURATION * FPS) * self.pan_px_per_frame, pan)
+            offset = min(round(t_s * DURATION * self.fps) * self.pan_px_per_frame, pan)
             y0 = float(offset) if pattern == 'top_to_bottom' else float(pan - offset)
         else:
             # 画像全体を左端〜右端まで表示。整数 px/frame でパン。
             y0 = (ph - sh) / 2.0
             pan = pw - sw
-            offset = min(round(t_s * DURATION * FPS) * self.pan_px_per_frame, pan)
+            offset = min(round(t_s * DURATION * self.fps) * self.pan_px_per_frame, pan)
             x0 = float(offset) if pattern == 'left_to_right' else float(pan - offset)
 
         return x0 / pw, (x0 + sw) / pw, 1.0 - y0 / ph, 1.0 - (y0 + sh) / ph
@@ -317,7 +332,7 @@ class SlideShow:
         60Hz ディスプレイのサンプルアンドホールド特性による波打ちを解消する。
         """
         N = MOTION_BLUR_SAMPLES
-        frame_dt = 1.0 / (DURATION * FPS)  # 1フレーム分のアニメーション進行量
+        frame_dt = 1.0 / (DURATION * self.fps)  # 1フレーム分のアニメーション進行量  # 1フレーム分のアニメーション進行量
         a = 1.0 / N                         # 各サンプルの重み
 
         glClear(GL_COLOR_BUFFER_BIT)
@@ -357,7 +372,7 @@ class SlideShow:
             t = min(elapsed / DURATION, 1.0)
             self._render_gl(t)
             pygame.display.flip()          # vsync 待機
-            self.clock.tick(FPS)           # vsync が無効な環境でのフォールバック
+            self.clock.tick(self.fps)           # vsync が無効な環境でのフォールバック
             now = time.perf_counter()      # clock.tick 完了後に計測（正確な経過時間）
 
             elapsed = now - self.start_time
