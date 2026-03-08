@@ -244,10 +244,15 @@ class SlideShow:
             outscale = sc
             pan_dist = target_h - self.sh
 
-        # 合計パン時間が DURATION に最も近くなる整数 px/frame を選択
-        pan_px_per_frame = max(1, round(pan_dist / (DURATION * self.fps)))
-        # 実際のパン完了時間（フレーム数から逆算）
-        slide_duration = math.ceil(pan_dist / pan_px_per_frame) / self.fps
+        if pan_dist > 0:
+            # 合計パン時間が DURATION に最も近くなる整数 px/frame を選択
+            pan_px_per_frame = max(1, round(pan_dist / (DURATION * self.fps)))
+            # 実際のパン完了時間（フレーム数から逆算）
+            slide_duration = math.ceil(pan_dist / pan_px_per_frame) / self.fps
+        else:
+            # パン不要（画像がスクリーンとぴったり同サイズ）
+            pan_px_per_frame = 0
+            slide_duration = DURATION
 
         pattern = self._next_pattern(candidates)
 
