@@ -30,6 +30,8 @@ import ctypes
 import math
 import os
 import random
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -61,6 +63,21 @@ MODEL_URL = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/R
 MODEL_PATH = Path.home() / '.cache' / 'realesrgan' / 'RealESRGAN_x4plus_anime_6B.pth'
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
+
+
+def get_display_fps(fallback: int = 60) -> int:
+    """xrandr からディスプレイの現在のリフレッシュレートを取得する。取得できない場合は fallback を返す。"""
+    try:
+        out = subprocess.check_output(['xrandr'], text=True, stderr=subprocess.DEVNULL)
+        for line in out.splitlines():
+            if '*' in line:
+                m = re.search(r'(\d+\.\d+)\*', line)
+                if m:
+                    return round(float(m.group(1)))
+    except Exception:
+        pass
+    print(f'警告: リフレッシュレートを取得できませんでした。{fallback}fps を使用します。', flush=True)
+    return fallback
 
 
 def collect_images(folder: str) -> list[str]:
@@ -118,7 +135,7 @@ class SlideShow:
 
         self._init_pygame()
         self._init_gl()
-        self.fps = self._detect_fps()
+        self.fps = get_display_fps()
         print(f'ディスプレイ検出FPS: {self.fps}', flush=True)
         self._init_images(folder)
 
@@ -150,23 +167,6 @@ class SlideShow:
         self.sw, self.sh = int(vp[2]), int(vp[3])
         pygame.mouse.set_visible(False)
         pygame.display.set_caption('Slideshow')
-
-    def _detect_fps(self) -> int:
-        """vsync flip を複数回計測してディスプレイの実際のリフレッシュレートを返す。
-        _init_gl 後に呼ぶこと（OpenGL コンテキストが整っていないと vsync が効かない）。"""
-        N = 10
-        glClear(GL_COLOR_BUFFER_BIT)
-        pygame.display.flip()  # 最初の1回は捨てる
-        t0 = time.perf_counter()
-        for _ in range(N):
-            glClear(GL_COLOR_BUFFER_BIT)
-            pygame.display.flip()
-        measured = N / (time.perf_counter() - t0)
-        # 標準的なリフレッシュレートに丸める
-        for standard in (24, 30, 48, 60, 75, 90, 120, 144, 165, 240):
-            if abs(measured - standard) / standard < 0.05:
-                return standard
-        return round(measured)
 
     def _init_gl(self) -> None:
         """OpenGL の基本設定"""
