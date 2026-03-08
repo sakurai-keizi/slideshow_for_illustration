@@ -66,11 +66,10 @@ IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '
 
 
 def collect_images(folder: str) -> list[str]:
-    images = []
-    for path in Path(folder).rglob('*'):
-        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
-            images.append(str(path))
-    return images
+    return [
+        str(p) for p in Path(folder).rglob('*')
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+    ]
 
 
 def cover_scale(iw: int, ih: int, sw: int, sh: int) -> float:
@@ -119,6 +118,23 @@ class SlideShow:
         self.upsampler = init_esrgan()
         print('初期化完了', flush=True)
 
+        self._init_pygame()
+        self._init_gl()
+        self._init_images(folder)
+
+        self.last_pattern: str | None = None
+        self.current_pattern: str = ''
+        self.pan_tex: int | None = None        # OpenGL テクスチャ ID
+        self.pan_tex_size: tuple[int, int] = (0, 0)  # (w, h)
+        self.start_time: float = 0.0
+        self.clock = pygame.time.Clock()
+
+        self._prefetch_arr: np.ndarray | None = None
+        self._prefetch_pattern: str = ''
+        self._prefetch_ready = threading.Event()
+        self._start_prefetch()
+
+    def _init_pygame(self) -> None:
         pygame.init()
         pygame.display.gl_set_attribute(pygame.GL_SWAP_CONTROL, 1)  # vsync
         self.screen = pygame.display.set_mode(
@@ -132,31 +148,6 @@ class SlideShow:
         pygame.mouse.set_visible(False)
         pygame.display.set_caption('Slideshow')
 
-        self._init_gl()
-
-        self.all_images = collect_images(folder)
-        if not self.all_images:
-            print(f'画像が見つかりません: {folder}')
-            pygame.quit()
-            sys.exit(1)
-
-        self.queue: list[str] = []
-        self.shown: list[str] = []
-        self._refill_queue()
-
-        self.last_pattern: str | None = None
-        self.current_pattern: str = ''
-        self.pan_tex: int | None = None        # OpenGL テクスチャ ID
-        self.pan_tex_size: tuple[int, int] = (0, 0)  # (w, h)
-        self.start_time: float = 0.0
-        self.clock = pygame.time.Clock()
-
-        # プリフェッチ用
-        self._prefetch_arr: np.ndarray | None = None
-        self._prefetch_pattern: str = ''
-        self._prefetch_ready = threading.Event()
-        self._prefetch_thread: threading.Thread | None = None
-
     def _init_gl(self) -> None:
         """OpenGL の基本設定"""
         glViewport(0, 0, self.sw, self.sh)
@@ -168,6 +159,16 @@ class SlideShow:
         glEnable(GL_TEXTURE_2D)
         glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)  # 頂点カラーでテクスチャをスケール
         glClearColor(0.0, 0.0, 0.0, 1.0)
+
+    def _init_images(self, folder: str) -> None:
+        self.all_images = collect_images(folder)
+        if not self.all_images:
+            print(f'画像が見つかりません: {folder}')
+            pygame.quit()
+            sys.exit(1)
+        self.queue: list[str] = []
+        self.shown: list[str] = []
+        self._refill_queue()
 
     def _refill_queue(self) -> None:
         self.queue = self.all_images[:]
@@ -222,8 +223,7 @@ class SlideShow:
             arr_out = cv2.bilateralFilter(arr_bgr, d=5, sigmaColor=40, sigmaSpace=40)
             arr_out = cv2.resize(arr_out, (extra_w, extra_h), interpolation=cv2.INTER_LANCZOS4)
 
-        arr_rgb = cv2.cvtColor(arr_out, cv2.COLOR_BGR2RGB)
-        return arr_rgb, pattern
+        return cv2.cvtColor(arr_out, cv2.COLOR_BGR2RGB), pattern
 
     def _upload_texture(self, arr_rgb: np.ndarray) -> tuple[int, int, int]:
         """
@@ -247,39 +247,22 @@ class SlideShow:
         while arr_bgr is None:
             path = self._next_image_path()
             arr_bgr = self._load_image_arr(path)
-        arr_rgb, pattern = self._process_to_arr(arr_bgr)
-        self._prefetch_arr = arr_rgb
-        self._prefetch_pattern = pattern
+        self._prefetch_arr, self._prefetch_pattern = self._process_to_arr(arr_bgr)
         self._prefetch_ready.set()
 
+    def _start_prefetch(self) -> None:
+        threading.Thread(target=self._prefetch_worker, daemon=True).start()
+
     def load_next_slide(self) -> None:
-        if self._prefetch_thread is not None:
-            # バックグラウンド準備が完了するまで待機
-            self._prefetch_ready.wait()
-            if self.pan_tex is not None:
-                glDeleteTextures([self.pan_tex])
-            self.pan_tex, pw, ph = self._upload_texture(self._prefetch_arr)
-            self.pan_tex_size = (pw, ph)
-            self.current_pattern = self._prefetch_pattern
-            self._prefetch_ready.clear()
-        else:
-            # 初回のみ同期処理
-            arr_bgr = None
-            while arr_bgr is None:
-                path = self._next_image_path()
-                arr_bgr = self._load_image_arr(path)
-            arr_rgb, pattern = self._process_to_arr(arr_bgr)
-            if self.pan_tex is not None:
-                glDeleteTextures([self.pan_tex])
-            self.pan_tex, pw, ph = self._upload_texture(arr_rgb)
-            self.pan_tex_size = (pw, ph)
-            self.current_pattern = pattern
-
+        self._prefetch_ready.wait()
+        if self.pan_tex is not None:
+            glDeleteTextures([self.pan_tex])
+        self.pan_tex, pw, ph = self._upload_texture(self._prefetch_arr)
+        self.pan_tex_size = (pw, ph)
+        self.current_pattern = self._prefetch_pattern
+        self._prefetch_ready.clear()
         self.start_time = time.perf_counter()
-
-        # 次の画像をバックグラウンドで準備開始
-        self._prefetch_thread = threading.Thread(target=self._prefetch_worker, daemon=True)
-        self._prefetch_thread.start()
+        self._start_prefetch()
 
     def _uv_for_t(self, t_sample: float) -> tuple[float, float, float, float]:
         """時刻 t_sample における UV 座標 (u0, u1, v_top, v_bot) を返す。
