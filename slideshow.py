@@ -373,6 +373,11 @@ class SlideShow:
     def run(self) -> None:
         self.load_next_slide()
         elapsed = 0.0
+        expected_frame = 1.0 / self.fps
+
+        # フレーム時間計測用（直近 fps 個分）
+        frame_times: list[float] = []
+        last_flip = time.perf_counter()
 
         while True:
             for event in pygame.event.get():
@@ -390,12 +395,23 @@ class SlideShow:
             self.clock.tick(self.fps)      # vsync が無効な環境でのフォールバック
             now = time.perf_counter()      # clock.tick 完了後に計測（正確な経過時間）
 
+            # フレーム時間を記録
+            frame_times.append(now - last_flip)
+            last_flip = now
+            if len(frame_times) > self.fps:
+                frame_times.pop(0)
+
             elapsed = now - self.start_time
             if elapsed >= self.slide_duration:
                 self.load_next_slide()
                 elapsed = time.perf_counter() - self.start_time
 
-            print(f'\rFPS: {self.clock.get_fps():.1f}', end='', flush=True)
+            # フレーム時間の統計を表示
+            if len(frame_times) >= 2:
+                avg = sum(frame_times) / len(frame_times)
+                worst = max(frame_times)
+                drops = sum(1 for ft in frame_times if ft > expected_frame * 1.5)
+                print(f'\rFPS avg:{1/avg:.1f}  worst:{worst*1000:.1f}ms  drops(>{expected_frame*1500:.0f}ms):{drops}/{len(frame_times)}', end='', flush=True)
 
 
 if __name__ == '__main__':
