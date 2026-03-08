@@ -60,6 +60,7 @@ from OpenGL.GLU import gluOrtho2D
 DURATION = 10.0          # 1枚あたりの表示秒数
 MOTION_BLUR_SAMPLES = 4  # モーションブラーのサンプル数（多いほど滑らか、4で十分）
 DEBUG_HORIZONTAL_ONLY = False  # デバッグ: True のとき横パン画像のみ表示（縦パン画像はスキップ）
+DEBUG_NO_ESRGAN = True         # デバッグ: True のとき ESRGAN を使わずバイリニア拡大で代替
 
 MODEL_URL = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth'
 MODEL_PATH = Path.home() / '.cache' / 'realesrgan' / 'RealESRGAN_x4plus_anime_6B.pth'
@@ -258,7 +259,7 @@ class SlideShow:
 
         pattern = self._next_pattern(candidates)
 
-        if sc > 1.0:
+        if sc > 1.0 and not DEBUG_NO_ESRGAN:
             # 拡大: Real-ESRGAN でアップスケール後に Lanczos で微調整
             arr_out, _ = self.upsampler.enhance(arr_bgr, outscale=outscale)
             # GPUの非同期処理が残っているとOpenGL描画と競合するため完了を待つ
@@ -266,9 +267,8 @@ class SlideShow:
             torch.cuda.synchronize()
             arr_out = cv2.resize(arr_out, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
         else:
-            # 縮小: バイラテラルフィルタ + Lanczos
-            arr_out = cv2.bilateralFilter(arr_bgr, d=5, sigmaColor=40, sigmaSpace=40)
-            arr_out = cv2.resize(arr_out, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+            # 縮小 or DEBUG_NO_ESRGAN: バイリニア拡大（CPU のみ、GPU 競合なし）
+            arr_out = cv2.resize(arr_bgr, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
         return cv2.cvtColor(arr_out, cv2.COLOR_BGR2RGBA), pattern, pan_px_per_frame, slide_duration
 
