@@ -44,20 +44,19 @@ from OpenGL.GL import (
     GL_MODELVIEW, GL_MODULATE, GL_ONE, GL_PROJECTION, GL_QUADS,
     GL_RGB, GL_TEXTURE_2D, GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE,
     GL_TEXTURE_MAG_FILTER, GL_TEXTURE_MIN_FILTER,
-    GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_UNSIGNED_BYTE, GL_VIEWPORT,
+    GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_UNPACK_ALIGNMENT, GL_UNSIGNED_BYTE, GL_VIEWPORT,
     glBegin, glBindTexture, glBlendFunc, glClear, glClearColor,
     glColor4f, glDeleteTextures, glDisable, glEnable, glEnd,
     glGenTextures, glGetIntegerv, glLoadIdentity, glMatrixMode,
-    glTexCoord2f, glTexEnvf, glTexImage2D, glTexParameteri,
+    glPixelStorei, glTexCoord2f, glTexEnvf, glTexImage2D, glTexParameteri,
     glVertex2f, glViewport,
 )
 from OpenGL.GLU import gluOrtho2D
 
 DURATION = 10.0          # 1枚あたりの表示秒数
-EXTRA = 0.10             # パンの移動量（10%）
 FPS = 60
 MOTION_BLUR_SAMPLES = 4  # モーションブラーのサンプル数（多いほど滑らか、4で十分）
-DEBUG_PX_PER_FRAME = 2  # デバッグ: 1フレームあたりの固定移動ピクセル数（0=通常モード）
+DEBUG_HORIZONTAL_ONLY = False  # デバッグ: True のとき横パン画像のみ表示（縦パン画像はスキップ）
 
 MODEL_URL = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth'
 MODEL_PATH = Path.home() / '.cache' / 'realesrgan' / 'RealESRGAN_x4plus_anime_6B.pth'
@@ -129,8 +128,11 @@ class SlideShow:
         self.start_time: float = 0.0
         self.clock = pygame.time.Clock()
 
+        self.pan_px_per_frame: int = 0
+
         self._prefetch_arr: np.ndarray | None = None
         self._prefetch_pattern: str = ''
+        self._prefetch_pan_px_per_frame: int = 0
         self._prefetch_ready = threading.Event()
         self._start_prefetch()
 
@@ -197,33 +199,46 @@ class SlideShow:
             print(f'読み込み失敗: {path}')
         return arr
 
-    def _process_to_arr(self, arr_bgr: np.ndarray) -> tuple[np.ndarray, str]:
+    def _process_to_arr(self, arr_bgr: np.ndarray) -> tuple[np.ndarray, str, int]:
         """
-        画像を処理してパン用 RGB 配列とパターンを返す。
-        - 拡大が必要: Real-ESRGAN → Lanczos
-        - 縮小のみ:   バイラテラルフィルタ → Lanczos
+        画像を処理してパン用 RGB 配列・パターン・パン速度（px/frame）を返す。
+        横長は水平パン、縦長は垂直パン。いずれも cover サイズで画像全体を端から端まで表示。
+        1フレームの移動量（整数）は合計パン時間が DURATION に最も近くなる値を選択。
+        拡大が必要な場合は Real-ESRGAN → Lanczos、縮小のみの場合はバイラテラル → Lanczos。
         """
         ih, iw = arr_bgr.shape[:2]
         sc = cover_scale(iw, ih, self.sw, self.sh)
-        extra_w = math.ceil(iw * sc * (1 + EXTRA))
-        extra_h = math.ceil(ih * sc * (1 + EXTRA))
 
         if iw * self.sh > ih * self.sw:
+            # 横長: 水平パン。cover サイズのみ（余白なし）で全体を表示。
             candidates = ['left_to_right', 'right_to_left']
+            target_w = math.ceil(iw * sc)
+            target_h = math.ceil(ih * sc)
+            outscale = sc
+            pan_dist = target_w - self.sw
         else:
+            # 縦長: 垂直パン。cover サイズのみ（余白なし）で全体を表示。
             candidates = ['top_to_bottom', 'bottom_to_top']
+            target_w = math.ceil(iw * sc)
+            target_h = math.ceil(ih * sc)
+            outscale = sc
+            pan_dist = target_h - self.sh
+
+        # 合計パン時間が DURATION に最も近くなる整数 px/frame を選択
+        pan_px_per_frame = max(1, round(pan_dist / (DURATION * FPS)))
+
         pattern = self._next_pattern(candidates)
 
         if sc > 1.0:
             # 拡大: Real-ESRGAN でアップスケール後に Lanczos で微調整
-            arr_out, _ = self.upsampler.enhance(arr_bgr, outscale=sc * (1 + EXTRA))
-            arr_out = cv2.resize(arr_out, (extra_w, extra_h), interpolation=cv2.INTER_LANCZOS4)
+            arr_out, _ = self.upsampler.enhance(arr_bgr, outscale=outscale)
+            arr_out = cv2.resize(arr_out, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
         else:
             # 縮小: バイラテラルフィルタ + Lanczos
             arr_out = cv2.bilateralFilter(arr_bgr, d=5, sigmaColor=40, sigmaSpace=40)
-            arr_out = cv2.resize(arr_out, (extra_w, extra_h), interpolation=cv2.INTER_LANCZOS4)
+            arr_out = cv2.resize(arr_out, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
 
-        return cv2.cvtColor(arr_out, cv2.COLOR_BGR2RGB), pattern
+        return cv2.cvtColor(arr_out, cv2.COLOR_BGR2RGB), pattern, pan_px_per_frame
 
     def _upload_texture(self, arr_rgb: np.ndarray) -> tuple[int, int, int]:
         """
@@ -238,8 +253,13 @@ class SlideShow:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)  # RGB は3バイト/px なので1バイト境界に設定
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, arr_flipped)
         return tex_id, w, h
+
+    def _is_horizontal(self, arr_bgr: np.ndarray) -> bool:
+        ih, iw = arr_bgr.shape[:2]
+        return iw * self.sh > ih * self.sw
 
     def _prefetch_worker(self) -> None:
         """バックグラウンドで次の画像を準備（numpy まで。GL アップロードはメインスレッドで行う）"""
@@ -247,7 +267,9 @@ class SlideShow:
         while arr_bgr is None:
             path = self._next_image_path()
             arr_bgr = self._load_image_arr(path)
-        self._prefetch_arr, self._prefetch_pattern = self._process_to_arr(arr_bgr)
+            if arr_bgr is not None and DEBUG_HORIZONTAL_ONLY and not self._is_horizontal(arr_bgr):
+                arr_bgr = None  # 縦パン画像はスキップ
+        self._prefetch_arr, self._prefetch_pattern, self._prefetch_pan_px_per_frame = self._process_to_arr(arr_bgr)
         self._prefetch_ready.set()
 
     def _start_prefetch(self) -> None:
@@ -260,42 +282,31 @@ class SlideShow:
         self.pan_tex, pw, ph = self._upload_texture(self._prefetch_arr)
         self.pan_tex_size = (pw, ph)
         self.current_pattern = self._prefetch_pattern
+        self.pan_px_per_frame = self._prefetch_pan_px_per_frame
         self._prefetch_ready.clear()
         self.start_time = time.perf_counter()
         self._start_prefetch()
 
     def _uv_for_t(self, t_sample: float) -> tuple[float, float, float, float]:
         """時刻 t_sample における UV 座標 (u0, u1, v_top, v_bot) を返す。
-        パン量をスクリーンサイズの EXTRA 倍に制限することで、画像サイズに依らず
-        フレームあたりの移動量を一定以下に抑え、60Hz ジャダーを解消する。
-        DEBUG_PX_PER_FRAME が True のとき、1フレームあたり1ピクセル固定移動。"""
+        pan_px_per_frame（整数）単位でパンし、画像全体を端から端まで表示する。"""
         pw, ph = self.pan_tex_size
         sw, sh = self.sw, self.sh
         pattern = self.current_pattern
         t_s = max(0.0, min(1.0, t_sample))
 
         if pattern in ('top_to_bottom', 'bottom_to_top'):
+            # 画像全体を上端〜下端まで表示。整数 px/frame でパン。
             x0 = (pw - sw) / 2.0
-            if DEBUG_PX_PER_FRAME:
-                pan = min(ph - sh, int(DURATION * FPS) * DEBUG_PX_PER_FRAME)
-                cy = (ph - sh) / 2.0
-                offset = round(t_s * pan / DEBUG_PX_PER_FRAME) * DEBUG_PX_PER_FRAME
-                y0 = (cy + pan / 2.0) - offset if pattern == 'top_to_bottom' else (cy - pan / 2.0) + offset
-            else:
-                pan = min(ph - sh, sh * EXTRA)
-                cy = (ph - sh) / 2.0
-                y0 = (cy + pan / 2.0) - pan * t_s if pattern == 'top_to_bottom' else (cy - pan / 2.0) + pan * t_s
+            pan = ph - sh
+            offset = min(round(t_s * DURATION * FPS) * self.pan_px_per_frame, pan)
+            y0 = float(offset) if pattern == 'top_to_bottom' else float(pan - offset)
         else:
+            # 画像全体を左端〜右端まで表示。整数 px/frame でパン。
             y0 = (ph - sh) / 2.0
-            if DEBUG_PX_PER_FRAME:
-                pan = min(pw - sw, int(DURATION * FPS))
-                cx = (pw - sw) / 2.0
-                offset = round(t_s * pan)
-                x0 = (cx + pan / 2.0) - offset if pattern == 'left_to_right' else (cx - pan / 2.0) + offset
-            else:
-                pan = min(pw - sw, sw * EXTRA)
-                cx = (pw - sw) / 2.0
-                x0 = (cx + pan / 2.0) - pan * t_s if pattern == 'left_to_right' else (cx - pan / 2.0) + pan * t_s
+            pan = pw - sw
+            offset = min(round(t_s * DURATION * FPS) * self.pan_px_per_frame, pan)
+            x0 = float(offset) if pattern == 'left_to_right' else float(pan - offset)
 
         return x0 / pw, (x0 + sw) / pw, 1.0 - y0 / ph, 1.0 - (y0 + sh) / ph
 
