@@ -118,6 +118,8 @@ class SlideShow:
 
         self._init_pygame()
         self._init_gl()
+        self.fps = self._detect_fps()
+        print(f'ディスプレイ検出FPS: {self.fps}', flush=True)
         self._init_images(folder)
 
         self.last_pattern: str | None = None
@@ -148,15 +150,16 @@ class SlideShow:
         self.sw, self.sh = int(vp[2]), int(vp[3])
         pygame.mouse.set_visible(False)
         pygame.display.set_caption('Slideshow')
-        self.fps = self._detect_fps()
-        print(f'ディスプレイ検出FPS: {self.fps}', flush=True)
 
     def _detect_fps(self) -> int:
-        """vsync flip を複数回計測してディスプレイの実際のリフレッシュレートを返す"""
+        """vsync flip を複数回計測してディスプレイの実際のリフレッシュレートを返す。
+        _init_gl 後に呼ぶこと（OpenGL コンテキストが整っていないと vsync が効かない）。"""
         N = 10
+        glClear(GL_COLOR_BUFFER_BIT)
         pygame.display.flip()  # 最初の1回は捨てる
         t0 = time.perf_counter()
         for _ in range(N):
+            glClear(GL_COLOR_BUFFER_BIT)
             pygame.display.flip()
         measured = N / (time.perf_counter() - t0)
         # 標準的なリフレッシュレートに丸める
