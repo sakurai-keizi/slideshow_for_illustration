@@ -44,13 +44,13 @@ import pygame
 from OpenGL.GL import (
     GL_BLEND, GL_CLAMP_TO_EDGE, GL_COLOR_BUFFER_BIT, GL_LINEAR,
     GL_MODELVIEW, GL_MODULATE, GL_ONE, GL_PROJECTION, GL_QUADS,
-    GL_RGB, GL_TEXTURE_2D, GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE,
+    GL_RGBA, GL_TEXTURE_2D, GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE,
     GL_TEXTURE_MAG_FILTER, GL_TEXTURE_MIN_FILTER,
-    GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_UNPACK_ALIGNMENT, GL_UNSIGNED_BYTE, GL_VIEWPORT,
+    GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_UNSIGNED_BYTE, GL_VIEWPORT,
     glBegin, glBindTexture, glBlendFunc, glClear, glClearColor,
     glColor4f, glDeleteTextures, glDisable, glEnable, glEnd,
     glGenTextures, glGetIntegerv, glLoadIdentity, glMatrixMode,
-    glPixelStorei, glTexCoord2f, glTexEnvf, glTexImage2D, glTexParameteri,
+    glTexCoord2f, glTexEnvf, glTexImage2D, glTexParameteri,
     glVertex2f, glViewport,
 )
 from OpenGL.GLU import gluOrtho2D
@@ -259,19 +259,23 @@ class SlideShow:
         if sc > 1.0:
             # 拡大: Real-ESRGAN でアップスケール後に Lanczos で微調整
             arr_out, _ = self.upsampler.enhance(arr_bgr, outscale=outscale)
+            # GPUの非同期処理が残っているとOpenGL描画と競合するため完了を待つ
+            import torch
+            torch.cuda.synchronize()
             arr_out = cv2.resize(arr_out, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
         else:
             # 縮小: バイラテラルフィルタ + Lanczos
             arr_out = cv2.bilateralFilter(arr_bgr, d=5, sigmaColor=40, sigmaSpace=40)
             arr_out = cv2.resize(arr_out, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
 
-        return cv2.cvtColor(arr_out, cv2.COLOR_BGR2RGB), pattern, pan_px_per_frame, slide_duration
+        return cv2.cvtColor(arr_out, cv2.COLOR_BGR2RGBA), pattern, pan_px_per_frame, slide_duration
 
     def _upload_texture(self, arr_rgb: np.ndarray) -> tuple[int, int, int]:
         """
         RGB numpy (h, w, 3) を OpenGL テクスチャにアップロードし (tex_id, w, h) を返す。
         OpenGL はデータを下→上に読むため flipud して正立させる。
         """
+        # RGBA (4バイト/px) は行が常に4バイト境界に揃うためドライバの最適パスが使える
         arr_flipped = np.ascontiguousarray(arr_rgb[::-1])
         h, w = arr_flipped.shape[:2]
         tex_id = int(glGenTextures(1))
@@ -280,8 +284,7 @@ class SlideShow:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)  # RGB は3バイト/px なので1バイト境界に設定
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, arr_flipped)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, arr_flipped)
         return tex_id, w, h
 
     def _is_horizontal(self, arr_bgr: np.ndarray) -> bool:
