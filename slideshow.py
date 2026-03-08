@@ -106,7 +106,11 @@ def build_display_server() -> Path:
         sys.exit('エラー: SDL2 開発ヘッダが見つかりません。\n'
                  '  sudo apt-get install -y libsdl2-dev  を実行してください。')
 
-    ret = subprocess.run(f'g++ -O2 -o {out} {src} {cflags} {libs} -lGLEW -lGL -lm -pthread', shell=True)
+    ret = subprocess.run(
+        f'g++ -O3 -march=native -mtune=native -flto -ffast-math -funroll-loops'
+        f' -fomit-frame-pointer -o {out} {src} {cflags} {libs} -lGLEW -lGL -lm -pthread',
+        shell=True,
+    )
     if ret.returncode != 0:
         sys.exit('エラー: display_server のビルドに失敗しました。')
     print('ビルド完了', flush=True)
