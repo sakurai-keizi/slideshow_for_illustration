@@ -147,10 +147,12 @@ class SlideShow:
         self.clock = pygame.time.Clock()
 
         self.pan_px_per_frame: int = 0
+        self.slide_duration: float = DURATION
 
         self._prefetch_arr: np.ndarray | None = None
         self._prefetch_pattern: str = ''
         self._prefetch_pan_px_per_frame: int = 0
+        self._prefetch_slide_duration: float = DURATION
         self._prefetch_ready = threading.Event()
         self._start_prefetch()
 
@@ -244,6 +246,8 @@ class SlideShow:
 
         # 合計パン時間が DURATION に最も近くなる整数 px/frame を選択
         pan_px_per_frame = max(1, round(pan_dist / (DURATION * self.fps)))
+        # 実際のパン完了時間（フレーム数から逆算）
+        slide_duration = math.ceil(pan_dist / pan_px_per_frame) / self.fps
 
         pattern = self._next_pattern(candidates)
 
@@ -256,7 +260,7 @@ class SlideShow:
             arr_out = cv2.bilateralFilter(arr_bgr, d=5, sigmaColor=40, sigmaSpace=40)
             arr_out = cv2.resize(arr_out, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
 
-        return cv2.cvtColor(arr_out, cv2.COLOR_BGR2RGB), pattern, pan_px_per_frame
+        return cv2.cvtColor(arr_out, cv2.COLOR_BGR2RGB), pattern, pan_px_per_frame, slide_duration
 
     def _upload_texture(self, arr_rgb: np.ndarray) -> tuple[int, int, int]:
         """
@@ -287,7 +291,7 @@ class SlideShow:
             arr_bgr = self._load_image_arr(path)
             if arr_bgr is not None and DEBUG_HORIZONTAL_ONLY and not self._is_horizontal(arr_bgr):
                 arr_bgr = None  # 縦パン画像はスキップ
-        self._prefetch_arr, self._prefetch_pattern, self._prefetch_pan_px_per_frame = self._process_to_arr(arr_bgr)
+        self._prefetch_arr, self._prefetch_pattern, self._prefetch_pan_px_per_frame, self._prefetch_slide_duration = self._process_to_arr(arr_bgr)
         self._prefetch_ready.set()
 
     def _start_prefetch(self) -> None:
@@ -301,6 +305,7 @@ class SlideShow:
         self.pan_tex_size = (pw, ph)
         self.current_pattern = self._prefetch_pattern
         self.pan_px_per_frame = self._prefetch_pan_px_per_frame
+        self.slide_duration = self._prefetch_slide_duration
         self._prefetch_ready.clear()
         self.start_time = time.perf_counter()
         self._start_prefetch()
@@ -372,14 +377,14 @@ class SlideShow:
                         pygame.quit()
                         sys.exit()
 
-            t = min(elapsed / DURATION, 1.0)
+            t = min(elapsed / self.slide_duration, 1.0)
             self._render_gl(t)
             pygame.display.flip()          # vsync 待機
-            self.clock.tick(self.fps)           # vsync が無効な環境でのフォールバック
+            self.clock.tick(self.fps)      # vsync が無効な環境でのフォールバック
             now = time.perf_counter()      # clock.tick 完了後に計測（正確な経過時間）
 
             elapsed = now - self.start_time
-            if elapsed >= DURATION:
+            if elapsed >= self.slide_duration:
                 self.load_next_slide()
                 elapsed = time.perf_counter() - self.start_time
 
