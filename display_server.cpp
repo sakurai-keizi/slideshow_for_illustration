@@ -1,18 +1,17 @@
 // display_server.cpp - C++ OpenGL display server for slideshow.py
 //
 // Protocol (Python → stdin, binary):
-//   Init:      [uint32 fps]
 //   Per image: [uint32 w][uint32 h][uint32 ppf][uint32 dir][uint32 dur_ms][w*h*4 RGBA bytes]
 //   dir: 0=left_to_right, 1=right_to_left, 2=top_to_bottom, 3=bottom_to_top
 //   Pixels are already vertically flipped for OpenGL (row 0 = bottom).
 //
 // Protocol (C++ → stdout, text):
-//   "READY\n"  - ready for next image (request it now)
-//   "QUIT\n"   - user pressed ESC/Q
+//   "SCREEN <w> <h> <fps>\n"  - sent once at startup with actual display info
+//   "READY\n"                 - ready for next image
+//   "QUIT\n"                  - user pressed ESC/Q
 
 #include <GL/glew.h>
 #include <SDL2/SDL.h>
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -30,7 +29,6 @@ static constexpr int BLUR_N = 4;
 struct ImageData {
     uint32_t w = 0, h = 0, ppf = 0, dir = 0, dur_ms = 0;
     std::vector<uint8_t> pixels;
-    bool valid = false;
 };
 
 static std::mutex              g_mtx;
@@ -71,7 +69,6 @@ static void io_thread_func() {
         ImageData img;
         img.w = hdr[0]; img.h = hdr[1]; img.ppf = hdr[2];
         img.dir = hdr[3]; img.dur_ms = hdr[4];
-        img.valid = true;
         img.pixels.resize((size_t)img.w * img.h * 4);
 
         if (!read_all(img.pixels.data(), img.pixels.size())) {
@@ -101,7 +98,6 @@ static int detect_fps(SDL_Window* win) {
 static void upload_texture(GLuint tex, const ImageData& img) {
     // PBO 経由でアップロード: CPU→PBO コピー後すぐにリターンし、
     // PBO→テクスチャ転送は GPU が非同期で行う。
-    // これによりメインスレッドのブロック時間を最小化し、フレーム遅延を防ぐ。
     GLuint pbo;
     glGenBuffers(1, &pbo);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
@@ -113,12 +109,30 @@ static void upload_texture(GLuint tex, const ImageData& img) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    // nullptr: PBO バインド中は GPU が PBO からテクスチャへ非同期で転送
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.w, img.h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);  // nullptr: PBO から GPU が非同期転送
 
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    glDeleteBuffers(1, &pbo);  // OpenGL の参照カウントにより GPU 転送完了まで実際には解放されない
+    glDeleteBuffers(1, &pbo);
+}
+
+// スライドが切り替わるたびに更新する描画パラメータ
+struct SlideParams {
+    double slide_dur;
+    double frame_dt;
+    double iw, ih;
+    double pan_dist;
+};
+
+static SlideParams make_params(const ImageData& img, int sw, int sh, int fps) {
+    SlideParams p;
+    p.slide_dur = img.dur_ms / 1000.0;
+    p.frame_dt  = 1.0 / (p.slide_dur * fps);
+    p.iw        = img.w;
+    p.ih        = img.h;
+    p.pan_dist  = (img.dir < 2) ? p.iw - sw : p.ih - sh;
+    if (p.pan_dist < 0) p.pan_dist = 0;
+    return p;
 }
 
 int main() {
@@ -153,19 +167,17 @@ int main() {
 
     int fps = detect_fps(win);
     fprintf(stderr, "Display: %dx%d  FPS: %d\n", sw, sh, fps);
-
-    // Report actual screen dimensions and fps to Python before any READY
     fprintf(stdout, "SCREEN %d %d %d\n", sw, sh, fps);
     fflush(stdout);
 
-    // Kick off IO thread to request first image
+    // IOスレッドを起動して最初の画像をリクエスト
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_want_next = true;
     }
     std::thread io_th(io_thread_func);
 
-    // Wait for first image
+    // 最初の画像を待つ
     {
         std::unique_lock<std::mutex> lk(g_mtx);
         g_cv_main.wait(lk, [] { return g_next_ready || g_quit.load(); });
@@ -182,8 +194,7 @@ int main() {
         std::lock_guard<std::mutex> lk(g_mtx);
         cur = std::move(g_next);
         g_next_ready = false;
-        // Immediately prefetch next image
-        g_want_next = true;
+        g_want_next  = true;  // 次の画像をプリフェッチ開始
     }
     g_cv_io.notify_one();
 
@@ -191,8 +202,9 @@ int main() {
     glGenTextures(1, &tex);
     upload_texture(tex, cur);
 
-    auto  t_start   = steady_clock::now();
-    bool  slide_done = false;
+    SlideParams sp      = make_params(cur, sw, sh, fps);
+    auto        t_start = steady_clock::now();
+    bool        slide_done = false;
 
     while (!g_quit) {
         SDL_Event ev;
@@ -204,14 +216,9 @@ int main() {
         }
         if (g_quit) break;
 
-        double slide_dur = cur.dur_ms / 1000.0;
-        double elapsed   = duration<double>(steady_clock::now() - t_start).count();
-        double t         = std::min(elapsed / slide_dur, 1.0);
-        double frame_dt  = 1.0 / (slide_dur * fps);
-        double iw        = cur.w, ih = cur.h;
-        double pan_dist  = (cur.dir < 2) ? iw - sw : ih - sh;
-        if (pan_dist < 0) pan_dist = 0;
-        float a = 1.0f / BLUR_N;
+        double elapsed = duration<double>(steady_clock::now() - t_start).count();
+        double t       = std::min(elapsed / sp.slide_dur, 1.0);
+        float  a       = 1.0f / BLUR_N;
 
         glClear(GL_COLOR_BUFFER_BIT);
         glEnable(GL_BLEND);
@@ -220,22 +227,22 @@ int main() {
         glBindTexture(GL_TEXTURE_2D, tex);
 
         for (int i = 0; i < BLUR_N; i++) {
-            double ts     = std::min(t + (i + 0.5) / BLUR_N * frame_dt, 1.0);
-            double offset = ts * pan_dist;   // continuous sub-pixel for smooth blur
+            double ts     = std::min(t + (i + 0.5) / BLUR_N * sp.frame_dt, 1.0);
+            double offset = ts * sp.pan_dist;
 
             double u0, u1, v_top, v_bot;
             if (cur.dir == 0 || cur.dir == 1) {
-                // horizontal pan
-                double x0 = (cur.dir == 0) ? offset : pan_dist - offset;
-                double y0 = (ih - sh) / 2.0;
-                u0    = x0 / iw; u1    = (x0 + sw) / iw;
-                v_top = 1.0 - y0 / ih; v_bot = 1.0 - (y0 + sh) / ih;
+                // 水平パン
+                double x0 = (cur.dir == 0) ? offset : sp.pan_dist - offset;
+                double y0 = (sp.ih - sh) / 2.0;
+                u0    = x0 / sp.iw; u1    = (x0 + sw) / sp.iw;
+                v_top = 1.0 - y0 / sp.ih; v_bot = 1.0 - (y0 + sh) / sp.ih;
             } else {
-                // vertical pan
-                double x0 = (iw - sw) / 2.0;
-                double y0 = (cur.dir == 2) ? offset : pan_dist - offset;
-                u0    = x0 / iw; u1    = (x0 + sw) / iw;
-                v_top = 1.0 - y0 / ih; v_bot = 1.0 - (y0 + sh) / ih;
+                // 垂直パン
+                double x0 = (sp.iw - sw) / 2.0;
+                double y0 = (cur.dir == 2) ? offset : sp.pan_dist - offset;
+                u0    = x0 / sp.iw; u1    = (x0 + sw) / sp.iw;
+                v_top = 1.0 - y0 / sp.ih; v_bot = 1.0 - (y0 + sh) / sp.ih;
             }
 
             glBegin(GL_QUADS);
@@ -249,34 +256,33 @@ int main() {
         glDisable(GL_BLEND);
         glColor4f(1, 1, 1, 1);
 
-        SDL_GL_SwapWindow(win);   // vsync wait
+        SDL_GL_SwapWindow(win);  // vsync 待機
 
-        // Advance to next image when slide done and prefetch is ready
-        if (!slide_done && elapsed >= slide_dur) slide_done = true;
+        // スライド終了かつプリフェッチ完了なら次へ
+        if (!slide_done && elapsed >= sp.slide_dur) slide_done = true;
         if (slide_done) {
-            bool have_next;
+            bool advanced = false;
             {
                 std::lock_guard<std::mutex> lk(g_mtx);
-                have_next = g_next_ready;
-            }
-            if (have_next) {
-                {
-                    std::lock_guard<std::mutex> lk(g_mtx);
-                    cur = std::move(g_next);
+                if (g_next_ready) {
+                    cur          = std::move(g_next);
                     g_next_ready = false;
-                    g_want_next  = true;   // prefetch following image
+                    g_want_next  = true;  // 次のプリフェッチを開始
+                    advanced     = true;
                 }
+            }
+            if (advanced) {
                 g_cv_io.notify_one();
                 upload_texture(tex, cur);
+                sp         = make_params(cur, sw, sh, fps);
                 t_start    = steady_clock::now();
                 slide_done = false;
             }
-            // else: keep rendering last frame until prefetch finishes
+            // プリフェッチ未完了なら最終フレームを保持して待機
         }
     }
 
     fprintf(stdout, "QUIT\n"); fflush(stdout);
-    g_quit = true;
     g_cv_io.notify_all();
     io_th.join();
 
