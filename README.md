@@ -12,7 +12,7 @@
   - 右から左へのパン
 - 小さい画像は Real-ESRGAN（アニメ向け x4 モデル）で自動アップスケール
 - 10秒ごとに画像を切り替え（全画像を一周するまで同じ画像は表示しない）
-- OpenGL + モーションブラーによる滑らかな描画（60fps / vsync）
+- C++ + OpenGL + モーションブラーによる滑らかな描画（リフレッシュレート自動検出 / vsync）
 
 ## 対応画像形式
 
@@ -23,6 +23,11 @@
 - Python 3.12 以上
 - CUDA 対応 GPU（Real-ESRGAN の高速処理に必要）
 - [uv](https://docs.astral.sh/uv/) がインストールされていること
+- SDL2 / GLEW 開発ライブラリ（C++ 表示サーバーのビルドに必要）
+
+```bash
+sudo apt-get install -y libsdl2-dev libglew-dev
+```
 
 ## uv のインストール
 
@@ -70,7 +75,6 @@ Real-ESRGAN のモデルファイル（約 66MB）を自動でダウンロード
 
 | 定数 | デフォルト | 説明 |
 |------|-----------|------|
-| `DURATION` | `10.0` | 1枚あたりの表示秒数 |
-| `EXTRA` | `0.10` | パンの移動量（画面サイズの 10%） |
-| `FPS` | `60` | フレームレート |
-| `MOTION_BLUR_SAMPLES` | `4` | モーションブラーのサンプル数 |
+| `DURATION` | `10.0` | 1枚あたりの表示秒数（パン距離から自動調整） |
+| `DEBUG_HORIZONTAL_ONLY` | `False` | `True` のとき横パン画像のみ表示（デバッグ用） |
+| `DEBUG_NO_ESRGAN` | `False` | `True` のとき ESRGAN を使わず Lanczos のみ（デバッグ用） |
