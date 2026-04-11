@@ -7,7 +7,7 @@
 #   "basicsr",
 #   "torch",
 #   "torchvision",
-#   "transformers",
+#   "openai-clip",
 #   "Pillow",
 # ]
 #
@@ -55,8 +55,8 @@ IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '
 DIRECTION = {'left_to_right': 0, 'right_to_left': 1, 'top_to_bottom': 2, 'bottom_to_top': 3}
 
 # CLIPによるアニメ/写真判別
-_CLIP_MODEL_ID = 'openai/clip-vit-base-patch32'
-_CLIP_LABELS   = ['a photograph', 'an illustration']
+_CLIP_MODEL_NAME = 'ViT-B/32'
+_CLIP_LABELS     = ['a photograph', 'an illustration']
 
 # ESRGANモデル設定（キー: 'anime' | 'photo'）
 _ESRGAN_MODELS: dict[str, dict[str, Any]] = {
@@ -119,29 +119,38 @@ def build_display_server() -> Path:
 # ── CLIP ─────────────────────────────────────────────────────────────────────
 
 def _init_clip() -> tuple[Any, Any]:
-    """CLIPモデルとプロセッサをCPUにロードして返す。
+    """CLIPモデルと前処理をCPUにロードして返す。
     ESRGANのGPU VRAMと競合しないよう意図的にCPUで実行する。
     """
-    import transformers
-    from transformers import CLIPModel, AutoProcessor
-    transformers.logging.set_verbosity_error()
+    # openai-clip は pkg_resources (setuptools) を使うが Python 3.13 では同梱されない。
+    # packaging は uv 環境に必ず存在するのでスタブで代替する。
+    if 'pkg_resources' not in sys.modules:
+        import types
+        import packaging
+        import packaging.version
+        _pr = types.ModuleType('pkg_resources')
+        _pr.packaging = packaging
+        sys.modules['pkg_resources'] = _pr
+    import clip
     print('CLIPモデルをロード中...', flush=True)
-    model     = CLIPModel.from_pretrained(_CLIP_MODEL_ID, use_safetensors=True)
-    processor = AutoProcessor.from_pretrained(_CLIP_MODEL_ID, use_fast=False)
+    model, preprocess = clip.load(_CLIP_MODEL_NAME, device='cpu')
     model.eval()
     print('CLIPモデルのロード完了', flush=True)
-    return model, processor
+    return model, preprocess
 
 
-def _classify_image(arr_bgr: np.ndarray, clip: tuple[Any, Any]) -> str:
+def _classify_image(arr_bgr: np.ndarray, clip_tuple: tuple[Any, Any]) -> str:
     """CLIPでアニメ/イラストと写真を判別し 'anime' または 'photo' を返す。"""
-    from PIL import Image
+    import clip
     import torch
-    clip_model, clip_processor = clip
-    img    = Image.fromarray(cv2.cvtColor(arr_bgr, cv2.COLOR_BGR2RGB))
-    inputs = clip_processor(text=_CLIP_LABELS, images=img, return_tensors='pt', padding=True)
+    from PIL import Image
+    clip_model, preprocess = clip_tuple
+    img         = Image.fromarray(cv2.cvtColor(arr_bgr, cv2.COLOR_BGR2RGB))
+    image_input = preprocess(img).unsqueeze(0)
+    text_tokens = clip.tokenize(_CLIP_LABELS)
     with torch.no_grad():
-        probs = clip_model(**inputs).logits_per_image.softmax(dim=1)[0]
+        logits, _ = clip_model(image_input, text_tokens)
+        probs     = logits.softmax(dim=-1)[0]
     result = 'photo' if probs[0] > probs[1] else 'anime'
     print(f'CLIP判別: {result}  '
           f'(photograph={float(probs[0]):.2f}, illustration={float(probs[1]):.2f})',
@@ -151,13 +160,42 @@ def _classify_image(arr_bgr: np.ndarray, clip: tuple[Any, Any]) -> str:
 # ── ESRGAN ────────────────────────────────────────────────────────────────────
 
 def _patch_torchvision() -> None:
-    """torchvision 0.17+ で削除された functional_tensor を basicsr 向けに補完"""
+    """torchvision 0.2.x との互換パッチ:
+    - functional_tensor (basicsr 向け、0.17+ で削除)
+    - InterpolationMode  (transformers 向け、0.9.0 で追加)
+    """
+    import torchvision.transforms as T
+    import torchvision.transforms.functional as F
+
+    # basicsr: functional_tensor モジュールが存在しない場合は作成
     if 'torchvision.transforms.functional_tensor' not in sys.modules:
         import types
-        import torchvision.transforms.functional as F
         mod = types.ModuleType('torchvision.transforms.functional_tensor')
-        mod.rgb_to_grayscale = F.rgb_to_grayscale
+        # rgb_to_grayscale は 0.9.0 で追加; 旧版では to_grayscale で代替
+        mod.rgb_to_grayscale = getattr(F, 'rgb_to_grayscale', None) or getattr(F, 'to_grayscale')
         sys.modules['torchvision.transforms.functional_tensor'] = mod
+
+    # transformers: InterpolationMode が存在しない場合は定義して注入
+    if not hasattr(T, 'InterpolationMode'):
+        from enum import Enum
+        class InterpolationMode(Enum):
+            NEAREST        = 'nearest'
+            NEAREST_EXACT  = 'nearest-exact'
+            BILINEAR       = 'bilinear'
+            BICUBIC        = 'bicubic'
+            BOX            = 'box'
+            HAMMING        = 'hamming'
+            LANCZOS        = 'lanczos'
+        T.InterpolationMode = InterpolationMode
+        F.InterpolationMode = InterpolationMode
+
+    # transformers: torchvision.io は動画用で CLIP では不要だがモジュール全体でインポートされる
+    if 'torchvision.io' not in sys.modules:
+        import types
+        import torchvision
+        io_mod = types.ModuleType('torchvision.io')
+        sys.modules['torchvision.io'] = io_mod
+        torchvision.io = io_mod
 
 
 def _init_esrgan(model_type: str) -> Any:
