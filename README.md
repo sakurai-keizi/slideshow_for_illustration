@@ -20,6 +20,9 @@
 
 ## 必要環境
 
+- OS: Linux（Ubuntu / Debian 系で動作確認済み）
+  - `apt-get` を使用するため Ubuntu / Debian 系を主対象とします
+  - 他のディストリビューション・macOS・Windows は未検証です
 - Python 3.12 以上
 - CUDA 対応 GPU（Real-ESRGAN の高速処理に必要）
 - [uv](https://docs.astral.sh/uv/) がインストールされていること
@@ -62,8 +65,12 @@ chmod +x slideshow.py
 
 ## 初回起動時の注意
 
-Real-ESRGAN のモデルファイル（約 66MB）を自動でダウンロードします。
-ダウンロード先: `~/.cache/realesrgan/RealESRGAN_x4plus_anime_6B.pth`
+CLIP の判定結果に応じて、Real-ESRGAN のモデルファイルを自動でダウンロードします（初回のみ）。
+
+| 判定 | モデル | ダウンロード元 | 保存先 |
+|------|--------|---------------|--------|
+| アニメ／イラスト | `RealESRGAN_x4plus_anime_6B.pth`（約 18MB） | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth | `~/.cache/realesrgan/RealESRGAN_x4plus_anime_6B.pth` |
+| 写真 | `RealESRGAN_x4plus.pth`（約 64MB） | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth | `~/.cache/realesrgan/RealESRGAN_x4plus.pth` |
 
 ## 操作方法
 
